@@ -2,37 +2,33 @@
 
 namespace App\Http\Controllers;
 
-use App\Models\Setting;
 use App\Http\Requests\UpsertSettingsRequest;
+use App\Services\SettingService;
+use App\Support\ApiResponse;
+use Illuminate\Http\JsonResponse;
 
 class SettingController extends Controller
 {
-    // GET /api/settings
-    public function index()
-    {
-        $settings = Setting::pluck('value', 'key');
-        return response()->json([
-            'success' => true,
-            'data' => $settings,
-        ]);
+    public function __construct(
+        private readonly SettingService $settingService,
+    ) {
     }
 
-    // PUT /api/settings
-    public function update(UpsertSettingsRequest $request)
+    public function index(): JsonResponse
     {
-        $data = $request->validated();
+        return ApiResponse::success(
+            $this->settingService->allKeyed(),
+            'Settings fetched successfully.',
+        );
+    }
 
-        foreach ($data as $key => $value) {
-            Setting::updateOrCreate(
-                ['key' => $key],
-                ['value' => $value]
-            );
-        }
+    public function update(UpsertSettingsRequest $request): JsonResponse
+    {
+        $settings = $this->settingService->upsertMany($request->validated());
 
-        return response()->json([
-            'success' => true,
-            'message' => 'Settings updated successfully',
-            'data' => Setting::pluck('value', 'key'),
-        ]);
+        return ApiResponse::success(
+            $settings,
+            'Settings updated successfully.',
+        );
     }
 }

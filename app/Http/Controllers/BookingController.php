@@ -2,215 +2,101 @@
 
 namespace App\Http\Controllers;
 
+use App\Http\Requests\Booking\CalculateBookingPriceRequest;
+use App\Http\Requests\Booking\IndexBookingRequest;
+use App\Http\Requests\Booking\StoreBookingRequest;
+use App\Http\Requests\Booking\UpdateBookingRequest;
+use App\Http\Resources\BookingResource;
 use App\Models\Booking;
-use App\Models\Setting;
-use Carbon\Carbon;
+use App\Services\BookingConfigService;
+use App\Services\BookingPricingService;
+use App\Services\BookingService;
+use App\Support\ApiResponse;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 
 class BookingController extends Controller
 {
-    private function getSettingsMap(): array
-    {
-        return Setting::pluck('value', 'key')->toArray();
+    public function __construct(
+        private readonly BookingService $bookingService,
+        private readonly BookingConfigService $bookingConfig,
+        private readonly BookingPricingService $bookingPricing,
+    ) {
     }
 
-    private function buildBookingConfig(): array
+    public function config(): JsonResponse
     {
-        $settings = $this->getSettingsMap();
-
-        $allSports = ['Cricket', 'Football'];
-        $courts = [
-            [
-                'id' => 'A',
-                'label' => 'Court A',
-                'is_active' => (bool) ($settings['court_a_status'] ?? true),
-                'configured_sport' => $settings['court_a_sport'] ?? 'Cricket',
-            ],
-            [
-                'id' => 'B',
-                'label' => 'Court B',
-                'is_active' => (bool) ($settings['court_b_status'] ?? true),
-                'configured_sport' => $settings['court_b_sport'] ?? 'Football',
-            ],
-        ];
-
-        $activeCourts = collect($courts)
-            ->filter(fn ($court) => $court['is_active'])
-            ->map(function ($court) use ($allSports) {
-                $allowedSports = $court['configured_sport'] === 'Multi'
-                    ? $allSports
-                    : [$court['configured_sport']];
-
-                return [
-                    ...$court,
-                    'allowed_sports' => $allowedSports,
-                    'default_sport' => $allowedSports[0] ?? null,
-                ];
-            })
-            ->values()
-            ->all();
-
-        return [
-            'courts' => $activeCourts,
-            'pricing' => [
-                'Cricket' => (float) ($settings['cricket_price'] ?? 0),
-                'Football' => (float) ($settings['football_price'] ?? 0),
-            ],
-        ];
+        return ApiResponse::success(
+            $this->bookingConfig->buildConfig(),
+            'Booking configuration loaded successfully.',
+        );
     }
 
-    private function calculatePriceForPayload(array $payload): float
+    public function calculatePrice(CalculateBookingPriceRequest $request): JsonResponse
     {
-        $config = $this->buildBookingConfig();
-        $hourlyRate = (float) ($config['pricing'][$payload['sport']] ?? 0);
+        $price = $this->bookingPricing->calculateForPayload($request->validated());
 
-        $start = Carbon::createFromFormat('H:i', substr($payload['start_time'], 0, 5));
-        $endTimeRaw = !empty($payload['end_time']) ? substr($payload['end_time'], 0, 5) : $start->copy()->addHour()->format('H:i');
-        $end = Carbon::createFromFormat('H:i', $endTimeRaw);
-
-        if ($end->lessThanOrEqualTo($start)) {
-            return $hourlyRate;
-        }
-
-        $minutes = $start->diffInMinutes($end);
-        $hours = max($minutes / 60, 1);
-
-        return round($hourlyRate * $hours, 2);
+        return ApiResponse::success(
+            ['price' => $price],
+            'Price calculated successfully.',
+        );
     }
 
-    public function config()
+    public function index(IndexBookingRequest $request): JsonResponse
     {
-        return response()->json([
-            'success' => true,
-            'data' => $this->buildBookingConfig(),
-        ]);
+        $filters = $request->validated();
+        $perPage = (int) ($filters['per_page'] ?? 10);
+
+        $paginator = $this->bookingService->paginateFiltered($filters, $perPage);
+
+        $paginator->through(fn (Booking $booking) => (new BookingResource($booking))->resolve($request));
+
+        return response()->json($paginator);
     }
 
-    public function calculatePrice(Request $request)
+    public function show(Request $request, Booking $booking): JsonResponse
     {
-        $validated = $request->validate([
-            'court' => 'required|in:A,B',
-            'sport' => 'required|in:Cricket,Football',
-            'start_time' => 'required|date_format:H:i',
-            'end_time' => 'nullable|date_format:H:i',
-        ]);
-
-        $price = $this->calculatePriceForPayload($validated);
-
-        return response()->json([
-            'success' => true,
-            'data' => [
-                'price' => $price,
-            ],
-        ]);
+        return response()->json((new BookingResource($booking))->resolve($request));
     }
 
-    // GET /api/bookings
-    public function index(Request $request)
+    public function store(StoreBookingRequest $request): JsonResponse
     {
-        $query = Booking::query()->orderBy('booking_date', 'desc')->orderBy('start_time', 'desc');
-
-        if ($request->has('court')) {
-            $query->where('court', $request->court);
-        }
-        if ($request->has('sport')) {
-            $query->where('sport', $request->sport);
-        }
-        if ($request->has('status')) {
-            $query->where('status', $request->status);
-        }
-        if ($request->has('date_from')) {
-            $query->where('booking_date', '>=', $request->date_from);
-        }
-        if ($request->has('date_to')) {
-            $query->where('booking_date', '<=', $request->date_to);
-        }
-        if ($request->has('search')) {
-            $query->where(function($q) use ($request) {
-                $q->where('customer_name', 'like', '%' . $request->search . '%')
-                  ->orWhere('phone_number', 'like', '%' . $request->search . '%');
-            });
-        }
-
-        return $query->paginate($request->per_page ?? 10);
+        $booking = $this->bookingService->create($request->validated());
+        return response()->json((new BookingResource($booking))->resolve($request), 201);
     }
 
-    // POST /api/bookings
-    public function store(Request $request)
+    public function update(UpdateBookingRequest $request, Booking $booking): JsonResponse
     {
-        $allowedSports = array_keys($this->buildBookingConfig()['pricing']);
-        $validated = $request->validate([
-            'customer_name' => 'required|string|max:255',
-            'phone_number' => 'required|string|max:20',
-            'court' => 'required|in:A,B',
-            'sport' => 'required|in:' . implode(',', $allowedSports),
-            'booking_date' => 'required|date',
-            'start_time' => 'required|date_format:H:i',
-            'end_time' => 'nullable|date_format:H:i',
-            'status' => 'in:Pending,Confirmed,Paid,Cancelled',
-            'notes' => 'nullable|string'
-        ]);
+        $booking = $this->bookingService->update($booking, $request->validated());
 
-        $validated['price'] = $this->calculatePriceForPayload($validated);
-        $booking = Booking::create($validated);
-        return response()->json($booking, 201);
+        return response()->json((new BookingResource($booking))->resolve($request));
     }
 
-    // PUT /api/bookings/{id}
-    public function update(Request $request, $id)
+    public function destroy(Booking $booking): JsonResponse
     {
-        $booking = Booking::findOrFail($id);
+        $this->bookingService->delete($booking);
 
-        $allowedSports = array_keys($this->buildBookingConfig()['pricing']);
-        $validated = $request->validate([
-            'customer_name' => 'string|max:255',
-            'phone_number' => 'string|max:20',
-            'court' => 'in:A,B',
-            'sport' => 'in:' . implode(',', $allowedSports),
-            'booking_date' => 'date',
-            'start_time' => 'date_format:H:i',
-            'end_time' => 'nullable|date_format:H:i',
-            'status' => 'in:Pending,Confirmed,Paid,Cancelled',
-            'notes' => 'nullable|string'
-        ]);
-
-        $priceContext = array_merge($booking->toArray(), $validated);
-        if (!empty($priceContext['start_time']) && !empty($priceContext['sport'])) {
-            $validated['price'] = $this->calculatePriceForPayload($priceContext);
-        }
-
-        $booking->update($validated);
-        return response()->json($booking);
-    }
-
-    // DELETE /api/bookings/{id}
-    public function destroy($id)
-    {
-        Booking::findOrFail($id)->delete();
         return response()->json(['message' => 'Booking deleted']);
     }
 
-    // Helper: Mark Paid
-    public function markPaid($id)
+    public function markPaid(Booking $booking): JsonResponse
     {
-        $booking = Booking::findOrFail($id);
-        $booking->update(['status' => 'Paid']);
-        return response()->json($booking);
+        $booking = $this->bookingService->markPaid($booking);
+
+        return response()->json((new BookingResource($booking))->resolve(request()));
     }
 
-    // Helper: Confirm
-    public function confirm($id)
+    public function confirm(Booking $booking): JsonResponse
     {
-        $booking = Booking::findOrFail($id);
-        $booking->update(['status' => 'Confirmed']);
-        return response()->json($booking);
+        $booking = $this->bookingService->confirm($booking);
+
+        return response()->json((new BookingResource($booking))->resolve(request()));
     }
 
-    // Helper: Cancel
-    public function cancel($id)
+    public function cancel(Booking $booking): JsonResponse
     {
-        $booking = Booking::findOrFail($id);
-        $booking->update(['status' => 'Cancelled']);
-        return response()->json($booking);
+        $booking = $this->bookingService->cancel($booking);
+
+        return response()->json((new BookingResource($booking))->resolve(request()));
     }
 }

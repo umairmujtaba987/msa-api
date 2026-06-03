@@ -3,41 +3,53 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
-use Spatie\Permission\Models\Role;
+use App\Http\Requests\Role\StoreRoleRequest;
+use App\Http\Requests\Role\UpdateRoleRequest;
+use App\Http\Resources\RoleResource;
+use App\Services\RoleService;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Spatie\Permission\Models\Role;
 
 class RoleController extends Controller
 {
-    public function index()
-    {
-        return Role::all();
+    public function __construct(
+        private readonly RoleService $roleService,
+    ) {
     }
 
-    public function store(Request $request)
+    public function index(Request $request): JsonResponse
     {
-        $request->validate([
-            'name' => 'required|unique:roles'
-        ]);
+        $roles = $this->roleService->all()->map(
+            fn (Role $role) => (new RoleResource($role))->resolve($request)
+        );
 
-        return Role::create(['name' => $request->name]);
+        return response()->json($roles->values()->all());
     }
 
-    public function show($id)
+    public function store(StoreRoleRequest $request): JsonResponse
     {
-        return Role::findOrFail($id);
+        $role = $this->roleService->create($request->validated('name'));
+
+        return response()->json((new RoleResource($role))->resolve($request), 201);
     }
 
-    public function update(Request $request, $id)
+    public function show(Request $request, Role $role): JsonResponse
     {
-        $role = Role::findOrFail($id);
-        $role->update(['name' => $request->name]);
-
-        return $role;
+        return response()->json((new RoleResource($role))->resolve($request));
     }
 
-    public function destroy($id)
+    public function update(UpdateRoleRequest $request, Role $role): JsonResponse
     {
-        Role::findOrFail($id)->delete();
+        $role = $this->roleService->update($role, $request->validated('name'));
+
+        return response()->json((new RoleResource($role))->resolve($request));
+    }
+
+    public function destroy(Role $role): JsonResponse
+    {
+        $this->roleService->delete($role);
+
         return response()->json(['message' => 'Role deleted']);
     }
 }

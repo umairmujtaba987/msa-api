@@ -8,7 +8,7 @@ class UpsertSettingsRequest extends FormRequest
 {
     public function authorize(): bool
     {
-        return true;
+        return $this->user() !== null;
     }
 
     public function rules(): array
@@ -22,6 +22,18 @@ class UpsertSettingsRequest extends FormRequest
             'football_price' => 'required|numeric|min:0',
             'arena_name' => 'required|string|max:255',
             'contact_email' => 'required|email|max:255',
+        ];
+    }
+
+    public function messages(): array
+    {
+        return [
+            'court_a_sport.required' => 'Court A sport is required.',
+            'court_b_sport.required' => 'Court B sport is required.',
+            'cricket_price.required' => 'Cricket hourly price is required.',
+            'football_price.required' => 'Football hourly price is required.',
+            'arena_name.required' => 'Arena name is required.',
+            'contact_email.email' => 'Enter a valid contact email.',
         ];
     }
 }

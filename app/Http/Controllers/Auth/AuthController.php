@@ -1,79 +1,71 @@
 <?php
+
 namespace App\Http\Controllers\Auth;
 
 use App\Http\Controllers\Controller;
+use App\Http\Requests\Auth\LoginRequest;
+use App\Http\Requests\Auth\UpdateProfileRequest;
+use App\Http\Resources\UserResource;
+use App\Services\AuthService;
+use App\Support\ApiResponse;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use App\Models\User;
-use Illuminate\Support\Facades\Hash;
-use Illuminate\Validation\Rule;
 
 class AuthController extends Controller
 {
-    public function login(Request $request)
+    public function __construct(
+        private readonly AuthService $authService,
+    ) {
+    }
+
+    public function login(LoginRequest $request): JsonResponse
     {
-        $request->validate([
-            'email' => 'required|email',
-            'password' => 'required'
-        ]);
+        $result = $this->authService->attemptLogin(
+            $request->validated('email'),
+            $request->validated('password'),
+        );
 
-        $user = User::with('roles')->where('email', $request->email)->first();
-
-        if (!$user || !Hash::check($request->password, $user->password)) {
+        if ($result === null) {
             return response()->json(['message' => 'Invalid credentials'], 401);
         }
 
-        $token = $user->createToken('api_token')->plainTextToken;
-
         return response()->json([
-            'token' => $token,
-            'user' => $user,
-            'roles' => $user->getRoleNames()
+            'token' => $result['token'],
+            'user' => (new UserResource($result['user']))->resolve($request),
+            'roles' => $result['roles'],
         ]);
     }
 
-    public function profile(Request $request)
+    public function profile(Request $request): JsonResponse
     {
-        return response()->json([
-            'success' => true,
-            'data' => $request->user()->load('roles'),
-        ]);
+        return ApiResponse::success(
+            (new UserResource($request->user()->load('roles')))->resolve($request),
+            'Profile fetched successfully.',
+        );
     }
 
-    public function updateProfile(Request $request)
+    public function updateProfile(UpdateProfileRequest $request): JsonResponse
     {
-        $user = $request->user();
+        $result = $this->authService->updateProfile($request->user(), $request->validated());
 
-        $validated = $request->validate([
-            'name' => 'required|string|max:255',
-            'email' => ['required', 'email', Rule::unique('users', 'email')->ignore($user->id)],
-            'current_password' => 'nullable|required_with:new_password|string',
-            'new_password' => 'nullable|string|min:8|confirmed',
-        ]);
-
-        if (!empty($validated['new_password'])) {
-            if (empty($validated['current_password']) || !Hash::check($validated['current_password'], $user->password)) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Current password is incorrect.',
-                ], 422);
-            }
-            $user->password = Hash::make($validated['new_password']);
+        if (isset($result['error'])) {
+            return response()->json([
+                'success' => false,
+                'message' => $result['error'],
+            ], 422);
         }
-
-        $user->name = $validated['name'];
-        $user->email = $validated['email'];
-        $user->save();
 
         return response()->json([
             'success' => true,
             'message' => 'Profile updated successfully.',
-            'data' => $user->load('roles'),
+            'data' => (new UserResource($result['user']))->resolve($request),
         ]);
     }
 
-    public function logout(Request $request)
+    public function logout(Request $request): JsonResponse
     {
-        $request->user()->currentAccessToken()->delete();
+        $this->authService->logoutCurrentToken($request->user());
+
         return response()->json(['message' => 'Logged out']);
     }
 }
